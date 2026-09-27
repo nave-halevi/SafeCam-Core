@@ -1,56 +1,82 @@
 import cv2
-import numpy as np  # ספרייה למתמטיקה ומטריצות
+import mediapipe as mp
 
 def main():
+    # אתחול הכלים של MediaPipe
+    mp_holistic = mp.solutions.holistic
+    mp_drawing = mp.solutions.drawing_utils
+    mp_drawing_styles = mp.solutions.drawing_styles
     cap = cv2.VideoCapture(0)
 
     if not cap.isOpened():
         print("Error: Could not open camera.")
         return
 
-    print("Camera is running. Press 'q' to quit.")
+    print("AI Camera is running. Press 'q' to quit.")
 
-    back_sub = cv2.createBackgroundSubtractorMOG2(history=500, varThreshold=50, detectShadows=True)
+    # הפעלת המודל עם הגדרות רגישות (0.5 = 50% ביטחון כדי לזהות ולעקוב)
+    with mp_holistic.Holistic(
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5) as holistic:
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                print("Error: Could not read frame.")
+                break
 
-    # יצירת "מברשת" לניפוח (אליפסה בגודל 7 על 7 פיקסלים)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            # המצלמה של ה-OpenCV קוראת צבעים בפורמט BGR, אבל MediaPipe דורש RGB
+            # לכן אנחנו ממירים את הצבעים לפני ששולחים ל-AI
+            image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
+            # נעילת התמונה לכתיבה כדי לשפר ביצועים בזמן שה-AI מנתח אותה
+            image_rgb.flags.writeable = False
+            
+            # --- כאן קורה הקסם: ה-AI מנתח את התמונה ומוצא את כל הנקודות ---
+            results = holistic.process(image_rgb)
+            
+            # החזרת התמונה למצב כתיבה והמרה חזרה ל-BGR כדי שנוכל להציג אותה
+            image_rgb.flags.writeable = True
+            image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Error: Could not read frame.")
-            break
+            # 1. ציור רשת הפנים (Face Mesh)
+            if results.face_landmarks:
+                mp_drawing.draw_landmarks(
+                    image_bgr,
+                    results.face_landmarks,
+                    mp_holistic.FACEMESH_TESSELATION,
+                    landmark_drawing_spec=None,
+                    connection_drawing_spec=mp_drawing_styles.get_default_face_mesh_tesselation_style())
 
-        # שלב 1: החלת מחסר הרקע
-        fg_mask = back_sub.apply(frame)
+            # 2. ציור כף יד ימין
+            if results.right_hand_landmarks:
+                mp_drawing.draw_landmarks(
+                    image_bgr,
+                    results.right_hand_landmarks,
+                    mp_holistic.HAND_CONNECTIONS,
+                    connection_drawing_spec=mp_drawing_styles.get_default_hand_connections_style())
 
-        # --- השלב החדש: ניקוי וחיבור המסכה ---
-        # א. העלמת הצללים: כל מה שלא לבן בוהק (מעל 254) הופך לשחור (0)
-        _, fg_mask = cv2.threshold(fg_mask, 254, 255, cv2.THRESH_BINARY)
+            # 3. ציור כף יד שמאל
+            if results.left_hand_landmarks:
+                mp_drawing.draw_landmarks(
+                    image_bgr,
+                    results.left_hand_landmarks,
+                    mp_holistic.HAND_CONNECTIONS,
+                    connection_drawing_spec=mp_drawing_styles.get_default_hand_connections_style())
 
-        # ב. ניפוח הכתמים הלבנים (Dilation) כדי לחבר אזורים קרובים. 
-        # iterations=4 אומר שאנחנו עושים את פעולת הניפוח 4 פעמים ברצף.
-        fg_mask = cv2.dilate(fg_mask, kernel, iterations=4)
-        # -------------------------------------
+            # 4. ציור שלד הגוף (Pose)
+            if results.pose_landmarks:
+                mp_drawing.draw_landmarks(
+                    image_bgr,
+                    results.pose_landmarks,
+                    mp_holistic.POSE_CONNECTIONS,
+                    landmark_drawing_spec=mp_drawing_styles.get_default_pose_landmarks_style())
 
-        # שלב 2: מציאת קווי המתאר
-        contours, _ = cv2.findContours(fg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            # תצוגת התוצאה
+            cv2.imshow('SafeCam - AI Tracking (Pose, Hands, Face)', image_bgr)
 
-        for contour in contours:
-            # הגדלנו קצת את השטח המינימלי, כי עכשיו הכתמים התנפחו
-            area = cv2.contourArea(contour)
-            if area < 4000: 
-                continue
-
-            # שלב 3: ציור מלבן חוסם
-            x, y, w, h = cv2.boundingRect(contour)
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-        cv2.imshow('SafeCam - Object Tracking', frame)
-        cv2.imshow('SafeCam - Foreground Mask', fg_mask)
-
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
 
     cap.release()
     cv2.destroyAllWindows()
